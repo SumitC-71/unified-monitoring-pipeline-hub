@@ -1,0 +1,70 @@
+{
+  "runtime": "TypeScript",
+  "functionsMetadata": [
+    {
+      "name": "helloWorld",
+      "scriptFile": "src\\function_app.ts",
+      "bindings": [
+        {
+          "name": "req",
+          "type": "httpTrigger",
+          "direction": "in",
+          "authLevel": "anonymous",
+          "methods": [
+            "post"
+          ],
+          "route": "helloWorld"
+        },
+        {
+          "name": "$return",
+          "type": "http",
+          "direction": "out"
+        }
+      ],
+      "fabricProperties": {
+        "fabricMetadataSchemaVersion": "1.0",
+        "fabricFunctionReturnType": "string",
+        "fabricFunctionParameters": [
+          {
+            "name": "firstName",
+            "dataType": "string",
+            "hasDefaultValue": false
+          },
+          {
+            "name": "lastName",
+            "dataType": "string",
+            "hasDefaultValue": false
+          }
+        ]
+      },
+      "functionCode": "udf.func(\n  'helloWorld',\n  (firstName: string, lastName: string): string =>\n    `Hello ${firstName} ${lastName}!`,\n  []\n)"
+    },
+    {
+      "name": "logMessage",
+      "scriptFile": "src\\function_app.ts",
+      "bindings": [
+        {
+          "name": "req",
+          "type": "httpTrigger",
+          "direction": "in",
+          "authLevel": "anonymous",
+          "methods": [
+            "post"
+          ],
+          "route": "logMessage"
+        },
+        {
+          "name": "$return",
+          "type": "http",
+          "direction": "out"
+        }
+      ],
+      "fabricProperties": {
+        "fabricMetadataSchemaVersion": "1.0",
+        "fabricFunctionReturnType": "void",
+        "fabricFunctionParameters": []
+      },
+      "functionCode": "udf.func(\n  'logMessage',\n  (): void => {\n    console.log('this message is from rayfin function, and it works fine');\n  },\n  []\n)"
+    }
+  ]
+}

@@ -5,11 +5,17 @@
 // </copyright>
 //-----------------------------------------------------------------------
 
+import { Counter } from './components/counter.component';
 import { EmptyStatePreview } from './EmptyStatePreview';
 
 // Replace this starting view with your app. See README.md for welcome cleanup.
 function App() {
-  return <EmptyStatePreview />;
+  return (
+    <>
+      <Counter />
+      <EmptyStatePreview />
+    </>
+  );
 }
 
 export default App;
