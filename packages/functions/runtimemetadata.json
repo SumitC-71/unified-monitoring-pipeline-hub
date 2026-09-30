@@ -2,30 +2,25 @@
   "schemaVersion": "2.0",
   "functions": [
     {
-      "functionName": "helloWorld",
+      "functionName": "onboardTenant",
       "delegateParameters": [
         {
-          "name": "firstName",
-          "type": "string",
+          "name": "tenant",
+          "type": "TenantOnboardingInput",
           "optional": false,
           "hasDefault": false,
           "position": 0,
           "isFabricParameter": false
         },
         {
-          "name": "lastName",
-          "type": "string",
+          "name": "ctx",
+          "type": "RayfinContext<UniversalAppSchema>",
           "optional": false,
           "hasDefault": false,
           "position": 1,
           "isFabricParameter": false
         }
       ],
-      "contextAudiences": []
-    },
-    {
-      "functionName": "logMessage",
-      "delegateParameters": [],
       "contextAudiences": []
     }
   ]

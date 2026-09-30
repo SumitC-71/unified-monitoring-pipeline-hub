@@ -17,12 +17,8 @@
  */
 
 export type AppFunctionsSchema = {
-  helloWorld: {
-    input: { firstName: string; lastName: string };
-    output: string;
-  };
-  logMessage: {
-    input: Record<string, never>;
-    output: void;
+  onboardTenant: {
+    input: { tenant: { tenant_id: string; tenant_name: string; platform: 'AzureDataFactory' | 'AzureSynapse' | 'Fabric'; subscription_id?: undefined | string; resource_group?: undefined | string; factory_or_workspace_name: string; fabric_workspace_id?: undefined | string; admin_name?: undefined | string; admin_email?: undefined | string; refresh_interval: number } };
+    output: { ok: true; tenant: { id: string; tenant_name: string; platform: 'AzureDataFactory' | 'AzureSynapse' | 'Fabric' } } | { ok: false; reason: 'invalid' | 'duplicate'; message: string; field?: undefined | 'tenant_id' | 'tenant_name' | 'platform' | 'subscription_id' | 'resource_group' | 'factory_or_workspace_name' | 'fabric_workspace_id' | 'admin_name' | 'admin_email' | 'refresh_interval' };
   };
 };

@@ -2,7 +2,7 @@
   "runtime": "TypeScript",
   "functionsMetadata": [
     {
-      "name": "helloWorld",
+      "name": "onboardTenant",
       "scriptFile": "src\\function_app.ts",
       "bindings": [
         {
@@ -13,7 +13,7 @@
           "methods": [
             "post"
           ],
-          "route": "helloWorld"
+          "route": "onboardTenant"
         },
         {
           "name": "$return",
@@ -23,48 +23,21 @@
       ],
       "fabricProperties": {
         "fabricMetadataSchemaVersion": "1.0",
-        "fabricFunctionReturnType": "string",
+        "fabricFunctionReturnType": "Promise<OnboardTenantResult>",
         "fabricFunctionParameters": [
           {
-            "name": "firstName",
-            "dataType": "string",
+            "name": "tenant",
+            "dataType": "TenantOnboardingInput",
             "hasDefaultValue": false
           },
           {
-            "name": "lastName",
-            "dataType": "string",
+            "name": "ctx",
+            "dataType": "RayfinContext<UniversalAppSchema>",
             "hasDefaultValue": false
           }
         ]
       },
-      "functionCode": "udf.func(\n  'helloWorld',\n  (firstName: string, lastName: string): string =>\n    `Hello ${firstName} ${lastName}!`,\n  []\n)"
-    },
-    {
-      "name": "logMessage",
-      "scriptFile": "src\\function_app.ts",
-      "bindings": [
-        {
-          "name": "req",
-          "type": "httpTrigger",
-          "direction": "in",
-          "authLevel": "anonymous",
-          "methods": [
-            "post"
-          ],
-          "route": "logMessage"
-        },
-        {
-          "name": "$return",
-          "type": "http",
-          "direction": "out"
-        }
-      ],
-      "fabricProperties": {
-        "fabricMetadataSchemaVersion": "1.0",
-        "fabricFunctionReturnType": "void",
-        "fabricFunctionParameters": []
-      },
-      "functionCode": "udf.func(\n  'logMessage',\n  (): void => {\n    console.log('this message is from rayfin function, and it works fine');\n  },\n  []\n)"
+      "functionCode": "udf.func(\n  'onboardTenant',\n  async (\n    tenant: TenantOnboardingInput,\n    ctx: RayfinContext<UniversalAppSchema>\n  ): Promise<OnboardTenantResult> => {\n    let fields: ReturnType<typeof validate>;\n    try {\n      fields = validate(tenant);\n    } catch (error) {\n      if (error instanceof InvalidInput) {\n        return { ok: false, reason: 'invalid', message: error.message, field: error.field };\n      }\n      throw error;\n    }\n\n    const data = ctx.getDataClient();\n\n    const existing = await data.TenantConfiguration.select(['id'])\n      .where({ id: { eq: fields.id } })\n      .execute();\n    if (existing.length > 0) {\n      return {\n        ok: false,\n        reason: 'duplicate',\n        message: 'This tenant is already onboarded.',\n        field: 'tenant_id',\n      };\n    }\n\n    const now = new Date();\n    const record: TenantConfigurationRecord = {\n      ...fields,\n      is_active: true,\n      onboarded_at: now,\n      created_at: now,\n      updated_at: now,\n    };\n    // Leave unset optional columns out of the insert entirely.\n    for (const key of Object.keys(record) as (keyof TenantConfigurationRecord)[]) {\n      if (record[key] === undefined) delete record[key];\n    }\n\n    const created = await data.TenantConfiguration.create(record);\n    console.log('onboardTenant created tenant configuration');\n\n    return {\n      ok: true,\n      tenant: {\n        id: created.id,\n        tenant_name: created.tenant_name,\n        platform: created.platform,\n      },\n    };\n  },\n  []\n)"
     }
   ]
 }

@@ -6,16 +6,7 @@
 //-----------------------------------------------------------------------
 
 import { render } from '@testing-library/react';
-import { describe, it, expect, vi } from 'vitest';
-
-// The welcome view polls a dev-only activity endpoint via `useSourceActivity`.
-// In this smoke test there is no dev server, so stub the hook to return no feed:
-// the view renders its illustrative state synchronously and nothing settles after
-// the test (which would otherwise log a React `act(...)` warning).
-vi.mock('./Welcome.activity', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./Welcome.activity')>();
-  return { ...actual, useSourceActivity: () => null };
-});
+import { describe, it, expect } from 'vitest';
 
 import App from '@/App';
 
