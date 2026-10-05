@@ -20,7 +20,11 @@
  * never written to disk.
  */
 
-// No secrets are declared in rayfin.yml, so the registry stays empty and
-// ctx.Secrets exposes nothing.
+declare module '@microsoft/fabric-user-data-functions' {
+  interface RayfinSecretRegistry {
+    CONSENT_APP_CLIENT_ID: string;
+    CONSENT_EMAIL_FLOW_URL: string;
+  }
+}
 
 export {};

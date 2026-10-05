@@ -18,7 +18,11 @@
 
 export type AppFunctionsSchema = {
   onboardTenant: {
-    input: { tenant: { tenant_id: string; tenant_name: string; platform: 'AzureDataFactory' | 'AzureSynapse' | 'Fabric'; subscription_id?: undefined | string; resource_group?: undefined | string; factory_or_workspace_name: string; fabric_workspace_id?: undefined | string; admin_name?: undefined | string; admin_email?: undefined | string; refresh_interval: number } };
-    output: { ok: true; tenant: { id: string; tenant_name: string; platform: 'AzureDataFactory' | 'AzureSynapse' | 'Fabric' } } | { ok: false; reason: 'invalid' | 'duplicate'; message: string; field?: undefined | 'tenant_id' | 'tenant_name' | 'platform' | 'subscription_id' | 'resource_group' | 'factory_or_workspace_name' | 'fabric_workspace_id' | 'admin_name' | 'admin_email' | 'refresh_interval' };
+    input: { tenant: { tenant_id: string; tenant_name: string; admin_name?: undefined | string; admin_email?: undefined | string; refresh_interval: number } };
+    output: { ok: true; tenant: { id: string; tenant_name: string; submitted_by_email?: undefined | string } } | { ok: false; reason: 'invalid' | 'duplicate' | 'unauthenticated'; message: string; field?: undefined | 'tenant_id' | 'tenant_name' | 'admin_name' | 'admin_email' | 'refresh_interval' };
+  };
+  sendConsentEmail: {
+    input: { request: { tenant_id: string; tenant_name: string; admin_name?: undefined | string; admin_email?: undefined | string } };
+    output: { ok: true; tenant_id: string; consent_status: 'Sent'; consent_sent_at: string } | { ok: false; reason: 'invalid' | 'unauthenticated' | 'already_sent' | 'already_granted' | 'missing_admin_email' | 'not_configured' | 'flow_rejected' | 'flow_timeout'; message: string };
   };
 };

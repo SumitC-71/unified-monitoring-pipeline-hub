@@ -49,8 +49,8 @@ function App() {
             Onboard a tenant
           </h1>
           <p className="text-400 leading-400 text-muted-foreground">
-            Register a tenant and where its pipelines run, so their activity can
-            be collected and monitored.
+            Register a tenant and its admin contact. Its workspaces across Data
+            Factory, Synapse, and Fabric are discovered automatically.
           </p>
         </div>
         <TenantOnboarding />

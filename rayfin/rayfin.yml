@@ -35,3 +35,8 @@ services:
     buildCommand: "npm run build"
     auth:
       type: "application"
+secrets:
+  - name: CONSENT_APP_CLIENT_ID
+    description: Client ID of the multi-tenant app registration that tenant admins grant consent to.
+  - name: CONSENT_EMAIL_FLOW_URL
+    description: Power Automate HTTP trigger URL that emails the admin consent link.

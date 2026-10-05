@@ -37,7 +37,45 @@
           }
         ]
       },
-      "functionCode": "udf.func(\n  'onboardTenant',\n  async (\n    tenant: TenantOnboardingInput,\n    ctx: RayfinContext<UniversalAppSchema>\n  ): Promise<OnboardTenantResult> => {\n    let fields: ReturnType<typeof validate>;\n    try {\n      fields = validate(tenant);\n    } catch (error) {\n      if (error instanceof InvalidInput) {\n        return { ok: false, reason: 'invalid', message: error.message, field: error.field };\n      }\n      throw error;\n    }\n\n    const data = ctx.getDataClient();\n\n    const existing = await data.TenantConfiguration.select(['id'])\n      .where({ id: { eq: fields.id } })\n      .execute();\n    if (existing.length > 0) {\n      return {\n        ok: false,\n        reason: 'duplicate',\n        message: 'This tenant is already onboarded.',\n        field: 'tenant_id',\n      };\n    }\n\n    const now = new Date();\n    const record: TenantConfigurationRecord = {\n      ...fields,\n      is_active: true,\n      onboarded_at: now,\n      created_at: now,\n      updated_at: now,\n    };\n    // Leave unset optional columns out of the insert entirely.\n    for (const key of Object.keys(record) as (keyof TenantConfigurationRecord)[]) {\n      if (record[key] === undefined) delete record[key];\n    }\n\n    const created = await data.TenantConfiguration.create(record);\n    console.log('onboardTenant created tenant configuration');\n\n    return {\n      ok: true,\n      tenant: {\n        id: created.id,\n        tenant_name: created.tenant_name,\n        platform: created.platform,\n      },\n    };\n  },\n  []\n)"
+      "functionCode": "udf.func(\n  'onboardTenant',\n  async (\n    tenant: TenantOnboardingInput,\n    ctx: RayfinContext<UniversalAppSchema>\n  ): Promise<OnboardTenantResult> => {\n    const audit = submitter(ctx.accessToken);\n    if (!audit) {\n      return {\n        ok: false,\n        reason: 'unauthenticated',\n        message: 'Sign in again so we can record who onboarded this tenant.',\n      };\n    }\n\n    let fields: ReturnType<typeof validate>;\n    try {\n      fields = validate(tenant);\n    } catch (error) {\n      if (error instanceof InvalidInput) {\n        return { ok: false, reason: 'invalid', message: error.message, field: error.field };\n      }\n      throw error;\n    }\n\n    const data = ctx.getDataClient();\n\n    const existing = await data.TenantConfiguration.select(['id'])\n      .where({ id: { eq: fields.id } })\n      .execute();\n    if (existing.length > 0) {\n      return {\n        ok: false,\n        reason: 'duplicate',\n        message: 'This tenant is already onboarded.',\n        field: 'tenant_id',\n      };\n    }\n\n    const now = new Date();\n    const record: TenantConfigurationRecord = {\n      ...fields,\n      ...audit,\n      consent_url: consentUrl(ctx),\n      consent_status: 'Pending',\n      is_active: true,\n      onboarded_at: now,\n      created_at: now,\n      updated_at: now,\n    };\n    // Leave unset optional columns out of the insert entirely.\n    for (const key of Object.keys(record) as (keyof TenantConfigurationRecord)[]) {\n      if (record[key] === undefined) delete record[key];\n    }\n\n    const created = await data.TenantConfiguration.create(record);\n    console.log('onboardTenant created tenant configuration');\n\n    return {\n      ok: true,\n      tenant: {\n        id: created.id,\n        tenant_name: created.tenant_name,\n        submitted_by_email: created.submitted_by_email ?? undefined,\n      },\n    };\n  },\n  []\n)"
+    },
+    {
+      "name": "sendConsentEmail",
+      "scriptFile": "src\\function_app.ts",
+      "bindings": [
+        {
+          "name": "req",
+          "type": "httpTrigger",
+          "direction": "in",
+          "authLevel": "anonymous",
+          "methods": [
+            "post"
+          ],
+          "route": "sendConsentEmail"
+        },
+        {
+          "name": "$return",
+          "type": "http",
+          "direction": "out"
+        }
+      ],
+      "fabricProperties": {
+        "fabricMetadataSchemaVersion": "1.0",
+        "fabricFunctionReturnType": "Promise<SendConsentEmailResult>",
+        "fabricFunctionParameters": [
+          {
+            "name": "request",
+            "dataType": "SendConsentEmailInput",
+            "hasDefaultValue": false
+          },
+          {
+            "name": "ctx",
+            "dataType": "RayfinContext<UniversalAppSchema>",
+            "hasDefaultValue": false
+          }
+        ]
+      },
+      "functionCode": "udf.func(\n  'sendConsentEmail',\n  async (\n    request: SendConsentEmailInput,\n    ctx: RayfinContext<UniversalAppSchema>\n  ): Promise<SendConsentEmailResult> => {\n    if (!submitter(ctx.accessToken)) {\n      return {\n        ok: false,\n        reason: 'unauthenticated',\n        message: 'Sign in again to send the consent email.',\n      };\n    }\n\n    // Work from the submitted details: on first onboarding the stored\n    // configuration may not be readable yet.\n    let tenantId: string;\n    let tenantName: string;\n    let adminName: string | undefined;\n    let adminEmail: string | undefined;\n    try {\n      if (typeof request !== 'object' || request === null) {\n        throw new InvalidInput('tenant_id', 'Tenant details are missing.');\n      }\n      tenantId = required(request, 'tenant_id', 'Tenant ID', 36);\n      if (!GUID.test(tenantId)) {\n        throw new InvalidInput('tenant_id', 'Tenant ID must be a GUID.');\n      }\n      tenantId = tenantId.toLowerCase();\n      tenantName = required(request, 'tenant_name', 'Tenant name', 200);\n      adminName = optional(request, 'admin_name', 'Admin name', 200);\n      adminEmail = optional(request, 'admin_email', 'Admin email', 320);\n      if (adminEmail !== undefined && !EMAIL.test(adminEmail)) {\n        throw new InvalidInput('admin_email', 'Admin email is not a valid address.');\n      }\n    } catch (error) {\n      if (error instanceof InvalidInput) {\n        return { ok: false, reason: 'invalid', message: error.message };\n      }\n      throw error;\n    }\n\n    if (!adminEmail) {\n      return {\n        ok: false,\n        reason: 'missing_admin_email',\n        message: 'Add an admin email for this tenant before sending consent.',\n      };\n    }\n\n    let flowUrl: string | undefined;\n    flowUrl = ctx.Secrets.CONSENT_EMAIL_FLOW_URL;\n    // flowUrl = ctx.getSecret('CONSENT_EMAIL_FLOW_URL'); \n    if (!flowUrl) {\n      return {\n        ok: false,\n        reason: 'not_configured',\n        message: 'The consent email service is not configured. - flow URL is missing',\n      };\n    }\n    const link = consentUrl(ctx);\n    if (!link) {\n      return {\n        ok: false,\n        reason: 'not_configured',\n        message: 'The consent email service is not configured. - link is missing',\n      };\n    }\n\n\n\n    // The record is optional here; when it exists, respect its consent state.\n    const data = ctx.getDataClient();\n    const [existing] = await data.TenantConfiguration.select(['id', 'consent_status'])\n      .where({ id: { eq: tenantId } })\n      .execute();\n    if (existing?.consent_status === 'Granted') {\n      return {\n        ok: false,\n        reason: 'already_granted',\n        message: 'Admin consent is already granted for this tenant.',\n      };\n    }\n    if (existing?.consent_status === 'Sent') {\n      return {\n        ok: false,\n        reason: 'already_sent',\n        message: 'The consent email was already sent to the tenant admin.',\n      };\n    }\n\n    let response: Response;\n    try {\n      response = await fetch(flowUrl, {\n        method: 'POST',\n        headers: { 'Content-Type': 'application/json' },\n        body: JSON.stringify({\n          adminName: adminName ?? '',\n          adminEmail,\n          tenantName,\n          consentUrl: link,\n        }),\n        signal: AbortSignal.timeout(CONSENT_FLOW_TIMEOUT_MS),\n      });\n    } catch (error) {\n      if (error instanceof Error && error.name === 'TimeoutError') {\n        return {\n          ok: false,\n          reason: 'flow_timeout',\n          message: 'The consent email service did not respond in time. Try again.',\n        };\n      }\n      // The flow URL carries its signature, so never surface fetch details.\n      throw new Error('Could not reach the consent email service.');\n    }\n\n    if (!response.ok) {\n      console.log(`sendConsentEmail flow rejected the request (${response.status})`);\n      return {\n        ok: false,\n        reason: 'flow_rejected',\n        message: `The consent email service rejected the request (${response.status}).`,\n      };\n    }\n\n    const now = new Date();\n    if (existing) {\n      await data.TenantConfiguration.update(\n        { id: tenantId },\n        { consent_status: 'Sent', consent_sent_at: now, consent_url: link, updated_at: now }\n      );\n      console.log('sendConsentEmail sent consent email');\n    } else {\n      console.log('sendConsentEmail sent consent email; no tenant record to update yet');\n    }\n\n    return {\n      ok: true,\n      tenant_id: tenantId,\n      consent_status: 'Sent',\n      consent_sent_at: now.toISOString(),\n    };\n  },\n  []\n)"
     }
   ]
 }

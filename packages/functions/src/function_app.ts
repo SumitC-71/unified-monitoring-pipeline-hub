@@ -4,20 +4,16 @@ import {
 } from '@microsoft/fabric-user-data-functions';
 import type {
   OnboardTenantResult,
+  SendConsentEmailInput,
+  SendConsentEmailResult,
   TenantConfigurationRecord,
   TenantOnboardingField,
   TenantOnboardingInput,
-  TenantPlatform,
   UniversalAppSchema,
 } from '@rayfin-app/shared';
 
 const udf = new UserDataFunctions();
 
-const PLATFORMS: readonly TenantPlatform[] = [
-  'AzureDataFactory',
-  'AzureSynapse',
-  'Fabric',
-];
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -30,9 +26,11 @@ class InvalidInput extends Error {
   }
 }
 
+type TextFields = Partial<Record<TenantOnboardingField, unknown>>;
+
 /** Trims a required text value and enforces the entity's `max` length. */
 function required(
-  input: TenantOnboardingInput,
+  input: TextFields,
   field: TenantOnboardingField,
   label: string,
   max: number
@@ -48,7 +46,7 @@ function required(
 
 /** Blank optional text becomes `undefined` so the column is left unset. */
 function optional(
-  input: TenantOnboardingInput,
+  input: TextFields,
   field: TenantOnboardingField,
   label: string,
   max: number
@@ -66,26 +64,14 @@ function optional(
   return value;
 }
 
-function guid(
-  value: string | undefined,
-  field: TenantOnboardingField,
-  label: string
-): string | undefined {
-  if (value === undefined) return undefined;
-  if (!GUID.test(value)) {
-    throw new InvalidInput(field, `${label} must be a GUID.`);
-  }
-  return value.toLowerCase();
-}
-
 function validate(input: TenantOnboardingInput) {
   if (typeof input !== 'object' || input === null) {
     throw new InvalidInput('tenant_id', 'Tenant details are missing.');
   }
 
-  const platform = input.platform;
-  if (!PLATFORMS.includes(platform)) {
-    throw new InvalidInput('platform', 'Choose a supported platform.');
+  const tenantId = required(input, 'tenant_id', 'Tenant ID', 36);
+  if (!GUID.test(tenantId)) {
+    throw new InvalidInput('tenant_id', 'Tenant ID must be a GUID.');
   }
 
   const refresh = input.refresh_interval;
@@ -102,30 +88,56 @@ function validate(input: TenantOnboardingInput) {
   }
 
   return {
-    id: guid(required(input, 'tenant_id', 'Tenant ID', 36), 'tenant_id', 'Tenant ID')!,
+    id: tenantId.toLowerCase(),
     tenant_name: required(input, 'tenant_name', 'Tenant name', 200),
-    platform,
-    subscription_id: guid(
-      optional(input, 'subscription_id', 'Subscription ID', 64),
-      'subscription_id',
-      'Subscription ID'
-    ),
-    resource_group: optional(input, 'resource_group', 'Resource group', 200),
-    factory_or_workspace_name: required(
-      input,
-      'factory_or_workspace_name',
-      'Factory or workspace name',
-      200
-    ),
-    fabric_workspace_id: guid(
-      optional(input, 'fabric_workspace_id', 'Fabric workspace ID', 64),
-      'fabric_workspace_id',
-      'Fabric workspace ID'
-    ),
     admin_name: optional(input, 'admin_name', 'Admin name', 200),
     admin_email: adminEmail,
     refresh_interval: refresh,
   };
+}
+
+/**
+ * Reads the submitter from the invocation's Rayfin JWT (`sub` and `email`
+ * claims) so the browser cannot claim to be someone else. The token's
+ * signature is enforced by the Rayfin DB on the data calls made with it, so
+ * the record is only written when the token is genuine.
+ */
+function submitter(
+  accessToken: string
+): { submitted_by: string; submitted_by_email?: string } | undefined {
+  const payload = accessToken?.split('.')[1];
+  if (!payload) return undefined;
+  let claims: unknown;
+  try {
+    claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+  } catch {
+    return undefined;
+  }
+  if (typeof claims !== 'object' || claims === null) return undefined;
+  const { sub, email } = claims as { sub?: unknown; email?: unknown };
+  const id = typeof sub === 'string' ? sub.trim() : '';
+  if (!id || id.length > 200) return undefined;
+  const mail = typeof email === 'string' ? email.trim() : '';
+  return {
+    submitted_by: id,
+    submitted_by_email: mail && mail.length <= 320 ? mail : undefined,
+  };
+}
+
+/**
+ * Admin consent link for this app's multi-tenant registration. The client ID
+ * comes from the `CONSENT_APP_CLIENT_ID` secret; `undefined` when it is unset
+ * or not a GUID, so callers can report the missing configuration.
+ */
+function consentUrl(ctx: RayfinContext<UniversalAppSchema>): string | undefined {
+  let clientId: string;
+  try {
+    clientId = ctx.Secrets.CONSENT_APP_CLIENT_ID?.trim() ?? '';
+  } catch {
+    return undefined;
+  }
+  if (!GUID.test(clientId)) return undefined;
+  return `https://login.microsoftonline.com/common/adminconsent?client_id=${clientId.toLowerCase()}`;
 }
 
 udf.func(
@@ -134,6 +146,15 @@ udf.func(
     tenant: TenantOnboardingInput,
     ctx: RayfinContext<UniversalAppSchema>
   ): Promise<OnboardTenantResult> => {
+    const audit = submitter(ctx.accessToken);
+    if (!audit) {
+      return {
+        ok: false,
+        reason: 'unauthenticated',
+        message: 'Sign in again so we can record who onboarded this tenant.',
+      };
+    }
+
     let fields: ReturnType<typeof validate>;
     try {
       fields = validate(tenant);
@@ -161,6 +182,9 @@ udf.func(
     const now = new Date();
     const record: TenantConfigurationRecord = {
       ...fields,
+      ...audit,
+      consent_url: consentUrl(ctx),
+      consent_status: 'Pending',
       is_active: true,
       onboarded_at: now,
       created_at: now,
@@ -179,8 +203,157 @@ udf.func(
       tenant: {
         id: created.id,
         tenant_name: created.tenant_name,
-        platform: created.platform,
+        submitted_by_email: created.submitted_by_email ?? undefined,
       },
+    };
+  },
+  []
+);
+
+/** Outbound deadline for the Power Automate HTTP trigger. */
+const CONSENT_FLOW_TIMEOUT_MS = 15_000;
+
+udf.func(
+  'sendConsentEmail',
+  async (
+    request: SendConsentEmailInput,
+    ctx: RayfinContext<UniversalAppSchema>
+  ): Promise<SendConsentEmailResult> => {
+    if (!submitter(ctx.accessToken)) {
+      return {
+        ok: false,
+        reason: 'unauthenticated',
+        message: 'Sign in again to send the consent email.',
+      };
+    }
+
+    // Work from the submitted details: on first onboarding the stored
+    // configuration may not be readable yet.
+    let tenantId: string;
+    let tenantName: string;
+    let adminName: string | undefined;
+    let adminEmail: string | undefined;
+    try {
+      if (typeof request !== 'object' || request === null) {
+        throw new InvalidInput('tenant_id', 'Tenant details are missing.');
+      }
+      tenantId = required(request, 'tenant_id', 'Tenant ID', 36);
+      if (!GUID.test(tenantId)) {
+        throw new InvalidInput('tenant_id', 'Tenant ID must be a GUID.');
+      }
+      tenantId = tenantId.toLowerCase();
+      tenantName = required(request, 'tenant_name', 'Tenant name', 200);
+      adminName = optional(request, 'admin_name', 'Admin name', 200);
+      adminEmail = optional(request, 'admin_email', 'Admin email', 320);
+      if (adminEmail !== undefined && !EMAIL.test(adminEmail)) {
+        throw new InvalidInput('admin_email', 'Admin email is not a valid address.');
+      }
+    } catch (error) {
+      if (error instanceof InvalidInput) {
+        return { ok: false, reason: 'invalid', message: error.message };
+      }
+      throw error;
+    }
+
+    if (!adminEmail) {
+      return {
+        ok: false,
+        reason: 'missing_admin_email',
+        message: 'Add an admin email for this tenant before sending consent.',
+      };
+    }
+
+    let flowUrl: string | undefined;
+    flowUrl = ctx.Secrets.CONSENT_EMAIL_FLOW_URL;
+    // flowUrl = ctx.getSecret('CONSENT_EMAIL_FLOW_URL'); 
+    if (!flowUrl) {
+      return {
+        ok: false,
+        reason: 'not_configured',
+        message: 'The consent email service is not configured. - flow URL is missing',
+      };
+    }
+    const link = consentUrl(ctx);
+    if (!link) {
+      return {
+        ok: false,
+        reason: 'not_configured',
+        message: 'The consent email service is not configured. - link is missing',
+      };
+    }
+
+
+
+    // The record is optional here; when it exists, respect its consent state.
+    const data = ctx.getDataClient();
+    const [existing] = await data.TenantConfiguration.select(['id', 'consent_status'])
+      .where({ id: { eq: tenantId } })
+      .execute();
+    if (existing?.consent_status === 'Granted') {
+      return {
+        ok: false,
+        reason: 'already_granted',
+        message: 'Admin consent is already granted for this tenant.',
+      };
+    }
+    if (existing?.consent_status === 'Sent') {
+      return {
+        ok: false,
+        reason: 'already_sent',
+        message: 'The consent email was already sent to the tenant admin.',
+      };
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(flowUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          adminName: adminName ?? '',
+          adminEmail,
+          tenantName,
+          consentUrl: link,
+        }),
+        signal: AbortSignal.timeout(CONSENT_FLOW_TIMEOUT_MS),
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === 'TimeoutError') {
+        return {
+          ok: false,
+          reason: 'flow_timeout',
+          message: 'The consent email service did not respond in time. Try again.',
+        };
+      }
+      // The flow URL carries its signature, so never surface fetch details.
+      throw new Error('Could not reach the consent email service.');
+    }
+
+    if (!response.ok) {
+      console.log(`sendConsentEmail flow rejected the request (${response.status})`);
+      return {
+        ok: false,
+        reason: 'flow_rejected',
+        message: `The consent email service rejected the request (${response.status}).`,
+      };
+    }
+
+    const now = new Date();
+    if (existing) {
+      await data.TenantConfiguration.update(
+        { id: tenantId },
+        { consent_status: 'Sent', consent_sent_at: now, consent_url: link, updated_at: now }
+      );
+      console.log('sendConsentEmail sent consent email');
+    } else {
+      console.log('sendConsentEmail sent consent email; no tenant record to update yet');
+    }
+
+    return {
+      ok: true,
+      tenant_id: tenantId,
+      consent_status: 'Sent',
+      consent_sent_at: now.toISOString(),
     };
   },
   []

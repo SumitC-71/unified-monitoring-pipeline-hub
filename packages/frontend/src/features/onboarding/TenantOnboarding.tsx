@@ -1,6 +1,7 @@
 //-----------------------------------------------------------------------
 // Tenant onboarding — collects a tenant's configuration and saves it to the
-// TenantConfiguration table through the `onboardTenant` function.
+// TenantConfiguration table through the `onboardTenant` function, then emails
+// the admin consent link through `sendConsentEmail`.
 //-----------------------------------------------------------------------
 
 import { useMemo, useState, type FormEvent, type ReactNode } from 'react';
@@ -9,42 +10,30 @@ import {
   Check,
   CircleAlert,
   CircleCheck,
-  Factory,
-  Layers,
   LoaderCircle,
+  Mail,
   RotateCcw,
-  Warehouse,
-  type LucideIcon,
 } from 'lucide-react';
 import type {
   OnboardTenantResult,
   TenantOnboardingField,
-  TenantPlatform,
 } from '@rayfin-app/shared';
 
 import { Button, Field, TextInput } from '@/components/ui/form-controls';
 import { cn } from '@/lib/utils';
 
-import { onboardTenant } from './onboard-tenant.service';
+import { onboardTenant, sendConsentEmail } from './onboard-tenant.service';
 import {
   EMPTY_TENANT_FORM,
   MAX_LENGTH,
-  PLATFORM_OPTIONS,
   REFRESH_PRESETS,
-  platformOption,
   toOnboardingInput,
   validateTenantForm,
   type TenantFormErrors,
   type TenantFormValues,
 } from './tenant-form.model';
 
-const PLATFORM_ICONS: Record<TenantPlatform, LucideIcon> = {
-  AzureDataFactory: Factory,
-  AzureSynapse: Warehouse,
-  Fabric: Layers,
-};
-
-type SectionId = 'tenant' | 'platform' | 'source' | 'admin' | 'schedule';
+type SectionId = 'tenant' | 'admin' | 'schedule';
 
 const SECTIONS: readonly {
   id: SectionId;
@@ -53,17 +42,6 @@ const SECTIONS: readonly {
   optional?: boolean;
 }[] = [
   { id: 'tenant', title: 'Tenant', fields: ['tenant_id', 'tenant_name'] },
-  { id: 'platform', title: 'Platform', fields: ['platform'] },
-  {
-    id: 'source',
-    title: 'Source location',
-    fields: [
-      'factory_or_workspace_name',
-      'subscription_id',
-      'resource_group',
-      'fabric_workspace_id',
-    ],
-  },
   {
     id: 'admin',
     title: 'Admin contact',
@@ -77,15 +55,44 @@ const SECTIONS: readonly {
 const REQUIRED: readonly (keyof TenantFormValues)[] = [
   'tenant_id',
   'tenant_name',
-  'platform',
-  'factory_or_workspace_name',
   'refresh_interval',
 ];
+
+type SavedTenantInfo = Extract<OnboardTenantResult, { ok: true }>['tenant'];
+
+/** What happened to the consent email after the tenant was saved. */
+type ConsentOutcome =
+  | { kind: 'sent'; email: string }
+  | { kind: 'skipped' }
+  | { kind: 'failed'; message: string };
 
 type Status =
   | { kind: 'editing' }
   | { kind: 'submitting' }
-  | { kind: 'saved'; tenant: Extract<OnboardTenantResult, { ok: true }>['tenant'] };
+  | { kind: 'saved'; tenant: SavedTenantInfo; consent: ConsentOutcome };
+
+/** Sends the consent email; a failure here never undoes the saved tenant. */
+async function requestConsent(
+  input: ReturnType<typeof toOnboardingInput>
+): Promise<ConsentOutcome> {
+  if (!input.admin_email) return { kind: 'skipped' };
+  try {
+    const result = await sendConsentEmail({
+      tenant_id: input.tenant_id,
+      tenant_name: input.tenant_name,
+      admin_name: input.admin_name,
+      admin_email: input.admin_email,
+    });
+    return result.ok
+      ? { kind: 'sent', email: input.admin_email }
+      : { kind: 'failed', message: result.message };
+  } catch (error) {
+    return {
+      kind: 'failed',
+      message: error instanceof Error ? error.message : 'The consent email could not be sent.',
+    };
+  }
+}
 
 export function TenantOnboarding() {
   const [values, setValues] = useState<TenantFormValues>(EMPTY_TENANT_FORM);
@@ -96,7 +103,6 @@ export function TenantOnboarding() {
   const [status, setStatus] = useState<Status>({ kind: 'editing' });
 
   const errors = useMemo(() => validateTenantForm(values), [values]);
-  const option = platformOption(values.platform);
   const submitting = status.kind === 'submitting';
 
   const visibleError = (field: TenantOnboardingField) =>
@@ -135,10 +141,7 @@ export function TenantOnboarding() {
   };
 
   const focusField = (field: TenantOnboardingField) => {
-    const target =
-      field === 'platform'
-        ? document.querySelector<HTMLInputElement>('input[name="platform"]')
-        : document.getElementById(field);
+    const target = document.getElementById(field);
     target?.focus();
     target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
@@ -157,9 +160,11 @@ export function TenantOnboarding() {
 
     setStatus({ kind: 'submitting' });
     try {
-      const result = await onboardTenant(toOnboardingInput(values));
+      const input = toOnboardingInput(values);
+      const result = await onboardTenant(input);
       if (result.ok) {
-        setStatus({ kind: 'saved', tenant: result.tenant });
+        const consent = await requestConsent(input);
+        setStatus({ kind: 'saved', tenant: result.tenant, consent });
         return;
       }
       setStatus({ kind: 'editing' });
@@ -178,7 +183,7 @@ export function TenantOnboarding() {
   };
 
   if (status.kind === 'saved') {
-    return <SavedTenant tenant={status.tenant} onAnother={reset} />;
+    return <SavedTenant tenant={status.tenant} consent={status.consent} onAnother={reset} />;
   }
 
   return (
@@ -245,179 +250,7 @@ export function TenantOnboarding() {
             </div>
           </Section>
 
-          <Section index={2} id="platform" title="Platform" description="Where this tenant's pipelines run.">
-            <div
-              role="radiogroup"
-              aria-label="Platform"
-              aria-invalid={!!visibleError('platform') || undefined}
-              aria-describedby={visibleError('platform') ? 'platform-error' : undefined}
-              className="grid gap-300 sm:grid-cols-3"
-            >
-              {PLATFORM_OPTIONS.map((platform) => {
-                const Icon = PLATFORM_ICONS[platform.value];
-                const selected = values.platform === platform.value;
-                return (
-                  <label
-                    key={platform.value}
-                    data-state={selected ? 'checked' : 'unchecked'}
-                    className={cn(
-                      'group relative flex cursor-pointer flex-col gap-300 rounded-xl border bg-card p-400 transition-[border-color,box-shadow,background-color]',
-                      'hover:border-primary/50 has-[:focus-visible]:ring-3 has-[:focus-visible]:ring-ring/25',
-                      'has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-60',
-                      selected
-                        ? 'border-primary bg-accent/60 shadow-xs'
-                        : 'border-border',
-                      visibleError('platform') && !selected && 'border-destructive/50'
-                    )}
-                  >
-                    <input
-                      type="radio"
-                      name="platform"
-                      value={platform.value}
-                      checked={selected}
-                      onChange={() => set('platform', platform.value)}
-                      onBlur={() => blur('platform')}
-                      className="sr-only"
-                    />
-                    <span className="flex items-center justify-between">
-                      <span
-                        className={cn(
-                          'flex icon-size-600 items-center justify-center rounded-lg transition-colors',
-                          selected
-                            ? 'bg-primary text-primary-foreground'
-                            : 'bg-secondary text-muted-foreground group-hover:text-foreground'
-                        )}
-                      >
-                        <Icon aria-hidden className="icon-size-200" />
-                      </span>
-                      <span
-                        aria-hidden
-                        className={cn(
-                          'flex icon-size-300 items-center justify-center rounded-full border transition-colors',
-                          selected
-                            ? 'border-primary bg-primary text-primary-foreground'
-                            : 'border-input'
-                        )}
-                      >
-                        {selected ? <Check className="icon-size-100" strokeWidth={3} /> : null}
-                      </span>
-                    </span>
-                    <span className="flex flex-col gap-100">
-                      <span className="text-300 leading-300 font-semibold text-foreground">
-                        {platform.label}
-                      </span>
-                      <span className="text-200 leading-200 text-muted-foreground">
-                        {platform.hint}
-                      </span>
-                    </span>
-                  </label>
-                );
-              })}
-            </div>
-            {visibleError('platform') ? (
-              <p id="platform-error" className="mt-200 flex items-center gap-100 text-200 leading-200 text-destructive">
-                <CircleAlert aria-hidden className="icon-size-100" />
-                {visibleError('platform')}
-              </p>
-            ) : null}
-          </Section>
-
-          <Section
-            index={3}
-            id="source"
-            title="Source location"
-            description={
-              option
-                ? `Where to find the ${option.label} resource.`
-                : 'Choose a platform first to see the fields it needs.'
-            }
-          >
-            <div className="grid gap-400 md:grid-cols-2">
-              <Field
-                id="factory_or_workspace_name"
-                label={option?.resourceLabel ?? 'Factory or workspace name'}
-                error={visibleError('factory_or_workspace_name')}
-                className="md:col-span-2"
-              >
-                <TextInput
-                  id="factory_or_workspace_name"
-                  maxLength={MAX_LENGTH.factory_or_workspace_name}
-                  placeholder={option?.value === 'Fabric' ? 'Sales Analytics' : 'adf-contoso-prod'}
-                  value={values.factory_or_workspace_name}
-                  invalid={!!visibleError('factory_or_workspace_name')}
-                  onChange={(e) => set('factory_or_workspace_name', e.target.value)}
-                  onBlur={() => blur('factory_or_workspace_name')}
-                />
-              </Field>
-
-              {option?.usesAzureResource ? (
-                <>
-                  <Field
-                    id="subscription_id"
-                    label="Subscription ID"
-                    optional
-                    hint="Azure subscription that holds the resource."
-                    error={visibleError('subscription_id')}
-                  >
-                    <TextInput
-                      id="subscription_id"
-                      mono
-                      autoComplete="off"
-                      spellCheck={false}
-                      maxLength={MAX_LENGTH.subscription_id}
-                      placeholder="xxxxxxxx-xxxx-…"
-                      value={values.subscription_id}
-                      invalid={!!visibleError('subscription_id')}
-                      onChange={(e) => set('subscription_id', e.target.value)}
-                      onBlur={() => blur('subscription_id')}
-                    />
-                  </Field>
-                  <Field
-                    id="resource_group"
-                    label="Resource group"
-                    optional
-                    error={visibleError('resource_group')}
-                  >
-                    <TextInput
-                      id="resource_group"
-                      maxLength={MAX_LENGTH.resource_group}
-                      placeholder="rg-data-prod"
-                      value={values.resource_group}
-                      invalid={!!visibleError('resource_group')}
-                      onChange={(e) => set('resource_group', e.target.value)}
-                      onBlur={() => blur('resource_group')}
-                    />
-                  </Field>
-                </>
-              ) : null}
-
-              {option?.usesFabricWorkspace ? (
-                <Field
-                  id="fabric_workspace_id"
-                  label="Fabric workspace ID"
-                  optional
-                  hint="Found in the workspace URL after /groups/."
-                  error={visibleError('fabric_workspace_id')}
-                  className="md:col-span-2"
-                >
-                  <TextInput
-                    id="fabric_workspace_id"
-                    mono
-                    autoComplete="off"
-                    spellCheck={false}
-                    maxLength={MAX_LENGTH.fabric_workspace_id}
-                    placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                    value={values.fabric_workspace_id}
-                    invalid={!!visibleError('fabric_workspace_id')}
-                    onChange={(e) => set('fabric_workspace_id', e.target.value)}
-                    onBlur={() => blur('fabric_workspace_id')}
-                  />
-                </Field>
-              ) : null}
-            </div>
-          </Section>
-
-          <Section index={4} id="admin" title="Admin contact" optional description="Who to reach about consent and access for this tenant.">
+          <Section index={2} id="admin" title="Admin contact" optional description="Who to reach about consent and access for this tenant.">
             <div className="grid gap-400 md:grid-cols-2">
               <Field id="admin_name" label="Name" optional error={visibleError('admin_name')}>
                 <TextInput
@@ -447,7 +280,7 @@ export function TenantOnboarding() {
             </div>
           </Section>
 
-          <Section index={5} id="schedule" title="Ingestion schedule" description="How often pipeline runs are pulled for this tenant.">
+          <Section index={3} id="schedule" title="Ingestion schedule" description="How often pipeline runs are pulled for this tenant.">
             <Field
               id="refresh_interval"
               label="Refresh interval"
@@ -504,7 +337,7 @@ export function TenantOnboarding() {
 
         <div className="sticky bottom-0 -mx-100 flex items-center justify-between gap-300 border-t border-border bg-background/90 px-100 py-400 backdrop-blur">
           <p className="hidden text-200 leading-200 text-muted-foreground sm:block">
-            New tenants are saved as active with the refresh interval you set.
+            New tenants are saved as active and recorded under your sign-in. If you add an admin email, they're sent the consent link.
           </p>
           <div className="ml-auto flex items-center gap-200">
             <Button variant="ghost" onClick={reset} disabled={submitting}>
@@ -631,13 +464,13 @@ function ReadinessRail({
 
 function SavedTenant({
   tenant,
+  consent,
   onAnother,
 }: {
-  tenant: Extract<OnboardTenantResult, { ok: true }>['tenant'];
+  tenant: SavedTenantInfo;
+  consent: ConsentOutcome;
   onAnother: () => void;
 }) {
-  const platform = platformOption(tenant.platform);
-  const Icon = PLATFORM_ICONS[tenant.platform] ?? Layers;
   return (
     <section
       aria-labelledby="saved-title"
@@ -651,23 +484,55 @@ function SavedTenant({
           Tenant onboarded
         </h2>
         <p className="text-300 leading-300 text-muted-foreground">
-          {tenant.tenant_name} is saved to the tenant configuration and marked active.
+          {tenant.tenant_name} is saved and marked active. Its workspaces will appear once discovery runs.
         </p>
       </div>
       <dl className="grid w-full gap-300 rounded-xl bg-secondary p-400 text-left text-300 leading-300">
         <div className="flex items-center justify-between gap-400">
-          <dt className="text-muted-foreground">Platform</dt>
-          <dd className="flex items-center gap-200 font-medium">
-            <Icon aria-hidden className="icon-size-200 text-primary" />
-            {platform?.label ?? tenant.platform}
-          </dd>
-        </div>
-        <div className="flex items-center justify-between gap-400">
           <dt className="text-muted-foreground">Tenant ID</dt>
           <dd className="truncate font-monospace text-200">{tenant.id}</dd>
         </div>
+        {tenant.submitted_by_email ? (
+          <div className="flex items-center justify-between gap-400">
+            <dt className="text-muted-foreground">Onboarded by</dt>
+            <dd className="truncate font-medium">{tenant.submitted_by_email}</dd>
+          </div>
+        ) : null}
       </dl>
+      <ConsentNotice consent={consent} />
       <Button onClick={onAnother}>Onboard another tenant</Button>
     </section>
+  );
+}
+
+function ConsentNotice({ consent }: { consent: ConsentOutcome }) {
+  if (consent.kind === 'sent') {
+    return (
+      <p role="status" className="flex w-full items-start gap-300 rounded-xl border border-border p-400 text-left text-300 leading-300">
+        <Mail aria-hidden className="mt-100-nudge icon-size-300 shrink-0 text-primary" />
+        <span>
+          Consent email sent to <span className="font-medium">{consent.email}</span>.
+        </span>
+      </p>
+    );
+  }
+  if (consent.kind === 'skipped') {
+    return (
+      <p className="w-full text-left text-300 leading-300 text-muted-foreground">
+        No admin email was given, so no consent email was sent.
+      </p>
+    );
+  }
+  return (
+    <div
+      role="alert"
+      className="flex w-full items-start gap-300 rounded-xl border border-destructive/30 bg-destructive/5 p-400 text-left text-300 leading-300"
+    >
+      <CircleAlert aria-hidden className="mt-100-nudge icon-size-300 shrink-0 text-destructive" />
+      <div className="flex flex-col gap-100">
+        <p className="font-semibold">Consent email not sent</p>
+        <p className="text-muted-foreground">{consent.message}</p>
+      </div>
+    </div>
   );
 }
